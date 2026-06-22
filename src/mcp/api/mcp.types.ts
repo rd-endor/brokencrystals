@@ -144,6 +144,8 @@ export interface SearchUsersToolInput {
   name: string;
 }
 
+export type GetTestimonialsToolInput = Record<string, never>;
+
 export interface UpdateUserToolInput {
   payload: Record<string, unknown>;
 }
@@ -273,6 +275,20 @@ export function isSearchUsersToolInput(
     typeof name === 'string' &&
     name.trim().length > 0
   );
+}
+
+export function isGetTestimonialsToolInput(
+  args: unknown
+): args is GetTestimonialsToolInput {
+  if (args === undefined || args === null) {
+    return true;
+  }
+
+  if (typeof args !== 'object' || Array.isArray(args)) {
+    return false;
+  }
+
+  return Object.keys(args).length === 0;
 }
 
 export function isUpdateUserToolInput(
