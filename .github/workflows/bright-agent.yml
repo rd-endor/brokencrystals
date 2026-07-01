@@ -119,48 +119,8 @@ jobs:
           sha256sum -c "${ASSET}.sha256"
           chmod +x "${ASSET}"
 
-      - name: Show all available Bright Agent env variables
-        env:
-          LOCAL_REPO_PATH: ${{ github.workspace }}
-          REPO_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          BRIGHT_TOKEN: ${{ secrets.BRIGHT_TOKEN }}
-          INFERENCE_URL: ${{ vars.INFERENCE_URL }}
-          INFERENCE_TOKEN: ${{ secrets.INFERENCE_TOKEN }}
-          REPOSITORY_URL: ""
-          AI_MODEL: ""
-          SCAN_SCOPE: ""
-          BRIGHT_DEBUG: ""
-          BRIGHT_STEERING_COMMENT: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
-          BRIGHT_STEERING_COMMENT_ID: ${{ github.event_name == 'issue_comment' && github.event.comment.id || '' }}
-          BRIGHT_STEERING_AUTHOR: ${{ github.event_name == 'issue_comment' && github.event.comment.user.login || '' }}
-          BRIGHT_STEERING_AUTHOR_ASSOCIATION: ${{ github.event_name == 'issue_comment' && github.event.comment.author_association || '' }}
-          BRIGHT_STEERING_PR_NUMBER: ${{ github.event_name == 'issue_comment' && github.event.issue.number || '' }}
-          BRIGHT_STEERING_PR_HEAD: ${{ steps.steer.outputs.head_ref }}
-          BRIGHT_STEERING_PR_BASE: ${{ steps.steer.outputs.base_ref }}
-        run: |
-          echo "=== Bright Agent — Available Environment Variables ==="
-          echo ""
-          echo "--- Required ---"
-          echo "BRIGHT_TOKEN:      [SET: $([ -n \"$BRIGHT_TOKEN\" ] && echo yes || echo no)]  # Bright API token"
-          echo "REPO_ACCESS_TOKEN: [SET: $([ -n \"$REPO_ACCESS_TOKEN\" ] && echo yes || echo no)]  # Token to push branches & open PRs"
-          echo "INFERENCE_TOKEN:   [SET: $([ -n \"$INFERENCE_TOKEN\" ] && echo yes || echo no)]  # API token for inference endpoint"
-          echo ""
-          echo "--- Optional ---"
-          echo "LOCAL_REPO_PATH:   ${LOCAL_REPO_PATH:-<not set, defaults to cwd>}  # Path to the checked-out repo"
-          echo "INFERENCE_URL:     ${INFERENCE_URL:-<not set, defaults to https://api.openai.com/v1>}  # OpenAI-compatible endpoint"
-          echo "REPOSITORY_URL:    ${REPOSITORY_URL:-<not set, derived from origin remote>}  # Repo identity for the PR"
-          echo "AI_MODEL:          ${AI_MODEL:-<not set, defaults to gpt-5.4-mini>}  # Model name or escalation chain"
-          echo "SCAN_SCOPE:        ${SCAN_SCOPE:-<not set>}  # Set to 'full' to force full-repo scan"
-          echo "BRIGHT_DEBUG:      ${BRIGHT_DEBUG:-<not set>}  # Set to '1' to mirror logs to console"
-          echo ""
-          echo "--- Steering (populated on /bright-agent comment) ---"
-          echo "BRIGHT_STEERING_COMMENT:              ${BRIGHT_STEERING_COMMENT:-<empty>}"
-          echo "BRIGHT_STEERING_COMMENT_ID:           ${BRIGHT_STEERING_COMMENT_ID:-<empty>}"
-          echo "BRIGHT_STEERING_AUTHOR:               ${BRIGHT_STEERING_AUTHOR:-<empty>}"
-          echo "BRIGHT_STEERING_AUTHOR_ASSOCIATION:   ${BRIGHT_STEERING_AUTHOR_ASSOCIATION:-<empty>}"
-          echo "BRIGHT_STEERING_PR_NUMBER:            ${BRIGHT_STEERING_PR_NUMBER:-<empty>}"
-          echo "BRIGHT_STEERING_PR_HEAD:              ${BRIGHT_STEERING_PR_HEAD:-<empty>}"
-          echo "BRIGHT_STEERING_PR_BASE:              ${BRIGHT_STEERING_PR_BASE:-<empty>}"
+      - name: Show all available env variables
+        run: env | sort
 
       - name: Run Bright Agent
         env:
