@@ -1,20 +1,26 @@
 # Bright Agent — SAST + STAR SAST validation for Broken Crystals
 #
-# Runs static analysis (CodeQL SAST) over this repo, then has Bright Agent
-# VALIDATE those static findings against a live STAR/DAST scan
-# (RUN_MODE=validation). Instead of committing fixes, it confirms which CodeQL
-# findings are actually reachable/exploitable on the running app and posts a
-# CodeQL → DAST validation summary. No fix loop runs.
+# Downloads the Endor Labs SAST SARIF artifact produced by the separate
+# endor-sast.yml workflow, then has Bright Agent VALIDATE those findings
+# against a live STAR/DAST scan (RUN_MODE=validation). No Endor scan runs
+# here, and no fix loop runs.
 #
-# This complements the DAST workflow (bright-agent.yml): that one scans + fixes,
-# this one proves out static findings dynamically.
+# This complements the STAR workflow (bright-agent.yml): that one scans + fixes,
+# this one proves out Endor static findings dynamically.
 #
-# The workflow only runs when you explicitly ask for it:
+# Sequence (two separate workflows, same SARIF env names):
+#   1. endor-sast.yml runs and uploads ENDOR_SARIF_ARTIFACT (endor-sast-sarif).
+#   2. this workflow starts after that run succeeds (workflow_run), or later
+#      via /bright-validate / workflow_dispatch.
 #
-#   • issue_comment     → a repo OWNER / MEMBER / COLLABORATOR comments
-#                         `/bright-validate` (lowercase) on a PR; runs CodeQL +
-#                         STAR validation against that PR's head branch.
-#   • workflow_dispatch → manual run, launched by hand on a chosen branch.
+# Keep ENDOR_WORKFLOW / ENDOR_SARIF_* in sync with endor-sast.yml.
+#
+#   • workflow_run      → after a successful Endor Labs SAST run; uses that
+#                         run's SARIF and the same commit.
+#   • issue_comment     → `/bright-validate` on a PR (OWNER/MEMBER/COLLABORATOR);
+#                         downloads the latest successful Endor SARIF for the
+#                         PR head branch.
+#   • workflow_dispatch → manual run on a chosen branch.
 #
 # Runner prerequisites: Docker, Docker Compose, Git, curl, sha256sum (all on
 # GitHub-hosted `ubuntu-latest`).
@@ -34,6 +40,9 @@
 name: Bright Agent (SAST Validation)
 
 on:
+  workflow_run:
+    workflows: ["Endor Labs SAST"]
+    types: [completed]
   issue_comment:
     types: [created]
   workflow_dispatch: {}
@@ -41,25 +50,29 @@ on:
 # contents: write      → push the validation summary branch
 # pull-requests: write → open/update the PR + summary comment + reactions
 # statuses: write      → set the commit status
-# security-events: write → only needed if you flip CodeQL `upload` to `always`
+# actions: read        → list Endor SAST runs and download its SARIF artifact
 permissions:
   contents: write
   pull-requests: write
   statuses: write
-  security-events: write
+  actions: read
 
-# One run per PR (its /bright-validate replies); else per ref (manual dispatch).
+# One run per Endor SAST run, PR comment, or dispatched ref.
 concurrency:
-  group: bright-sast-validation-${{ github.event.issue.number || github.ref }}
+  group: bright-sast-validation-${{ github.event.workflow_run.id || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   sast-validation:
     # Trigger gates:
-    #  • issue_comment: a lowercase `/bright-validate` comment from a repo
-    #                   OWNER / MEMBER / COLLABORATOR on a PR.
+    #  • workflow_run: Endor Labs SAST succeeded on a same-repo ref.
+    #  • issue_comment: `/bright-validate` from OWNER / MEMBER / COLLABORATOR.
     #  • workflow_dispatch: always (manual run on a chosen branch).
     if: >-
+      (github.event_name == 'workflow_run' &&
+        github.event.workflow_run.conclusion == 'success' &&
+        (github.event.workflow_run.event != 'pull_request' ||
+          github.event.workflow_run.head_repository.full_name == github.repository)) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         contains(github.event.comment.body, '/bright-validate') &&
@@ -69,9 +82,13 @@ jobs:
     env:
       # Runner platform/arch: linux-x64 | linux-arm64 | darwin-x64 | darwin-arm64
       ASSET: bright-agent-linux-x64
-      # CodeQL language to analyze. Broken Crystals is a NestJS (TypeScript) app.
-      # CodeQL writes "<language>.sarif" into the output dir below.
-      CODEQL_LANGUAGE: javascript
+      ENDOR_WORKFLOW: endor-sast.yml
+      ENDOR_SARIF_ARTIFACT: endor-sast-sarif
+      ENDOR_SARIF_FILE: endor-sast.sarif
+      SARIF_DIR: ${{ runner.temp }}/sarif
+      ENDOR_NAMESPACE: ${{ vars.ENDOR_NAMESPACE || 'ram-learn' }}
+      ENDOR_API: ${{ vars.ENDOR_API || 'https://api.endorlabs.com' }}
+      ENDOR_LANGUAGES: javascript,typescript
     steps:
       # For a `/bright-validate` comment: resolve the PR over the API and REFUSE
       # fork PRs BEFORE any checkout. issue_comment runs in the base-repo context
@@ -107,35 +124,54 @@ jobs:
             core.setOutput("head_ref", pr.head.ref);
             core.setOutput("base_ref", pr.base.ref);
 
-      # Check out the tree to analyze. /bright-validate comment → the PR head
-      # branch; manual dispatch → the chosen ref.
+      # Same tree the Endor SARIF was produced from when this run was chained;
+      # /bright-validate → PR head; manual dispatch → the chosen ref.
       - uses: actions/checkout@v5
         with:
           ref: >-
-            ${{ (github.event_name == 'issue_comment' && steps.steer.outputs.head_ref)
+            ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha)
+              || (github.event_name == 'issue_comment' && steps.steer.outputs.head_ref)
               || github.ref }}
           fetch-depth: 2
 
-      # 1. Static analysis (SAST) with CodeQL → SARIF file. Write it OUTSIDE the
-      #    checkout ($RUNNER_TEMP) so it's never swept into a commit.
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: ${{ env.CODEQL_LANGUAGE }}
+      # 1. Consume the SARIF produced by the separate Endor Labs SAST workflow.
+      #    Written/downloaded outside the checkout ($RUNNER_TEMP) so it is never
+      #    swept into a commit.
+      - name: Resolve Endor SAST run
+        id: endor
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
+          HEAD_REF: ${{ (github.event_name == 'issue_comment' && steps.steer.outputs.head_ref) || github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
+            run_id="${WORKFLOW_RUN_ID}"
+          else
+            run_id="$(gh run list \
+              --workflow "${ENDOR_WORKFLOW}" \
+              --branch "${HEAD_REF}" \
+              --status success \
+              --limit 1 \
+              --json databaseId \
+              --jq '.[0].databaseId // empty')"
+          fi
+          if [ -z "${run_id}" ]; then
+            echo "No successful Endor Labs SAST run found for branch ${HEAD_REF}."
+            echo "Run the Endor Labs SAST workflow first, then retry."
+            exit 1
+          fi
+          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
+          echo "Using Endor SAST run ${run_id}"
 
-      # javascript/typescript needs no build. If you switch CODEQL_LANGUAGE to a
-      # compiled language (java, go, csharp, cpp), autobuild covers most projects.
-      - name: Autobuild
-        uses: github/codeql-action/autobuild@v3
-
-      - name: Analyze (write SARIF to $RUNNER_TEMP/sarif)
-        uses: github/codeql-action/analyze@v3
+      - name: Download Endor SARIF artifact
+        uses: actions/download-artifact@v4
         with:
-          output: ${{ runner.temp }}/sarif
-          # We only need the SARIF locally for validation. Set to `always` to
-          # also publish results to the repo's Security tab (needs
-          # security-events: write, already granted above).
-          upload: never
+          name: ${{ env.ENDOR_SARIF_ARTIFACT }}
+          path: ${{ env.SARIF_DIR }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.endor.outputs.run_id }}
 
       # 2. Fetch the Bright Agent binary (outside the checkout).
       - name: Download & verify Bright Agent
@@ -152,7 +188,7 @@ jobs:
       - name: Show all available env variables
         run: env | sort
 
-      # 3. Validate the CodeQL (SAST) findings against a live STAR/DAST scan.
+      # 3. Validate the Endor (SAST) findings against a live STAR/DAST scan.
       - name: Run Bright Agent (SAST validation)
         env:
           # Run against the checked-out tree. REPOSITORY_URL is derived from the
@@ -163,11 +199,10 @@ jobs:
           INFERENCE_URL: ${{ vars.INFERENCE_URL }}
           INFERENCE_TOKEN: ${{ secrets.INFERENCE_TOKEN }}
           BRIGHT_PROJECT_ID: ${{ vars.BRIGHT_PROJECT_ID }}
-          # Validation mode: map CodeQL findings → DAST tests, scan, and report
-          # which are dynamically confirmed. No fix loop runs.
+          # Validation mode: map Endor SARIF findings → DAST tests, scan, and
+          # report which are dynamically confirmed. No fix loop runs.
           RUN_MODE: validation
-          # CodeQL writes "<language>.sarif" into the output dir above.
-          SARIF_PATH: ${{ runner.temp }}/sarif/${{ env.CODEQL_LANGUAGE }}.sarif
+          SARIF_PATH: ${{ env.SARIF_DIR }}/${{ env.ENDOR_SARIF_FILE }}
           # Steering inputs — populated only for a `/bright-validate` comment;
           # empty for a manual dispatch.
           BRIGHT_STEERING_COMMENT: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
@@ -203,12 +238,12 @@ jobs:
           path: ${{ runner.temp }}/bright-dumps/
           if-no-files-found: ignore
 
-      - name: Upload CodeQL SARIF
+      - name: Upload Endor SARIF used for validation
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bright-agent-sast-sarif
-          path: ${{ runner.temp }}/sarif/
+          path: ${{ env.SARIF_DIR }}/
           if-no-files-found: ignore
 
 # NOTE: commits/PRs/comments made with GITHUB_TOKEN do not trigger your other

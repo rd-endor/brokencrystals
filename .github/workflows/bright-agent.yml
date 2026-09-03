@@ -1,73 +1,64 @@
-# Bright Agent — GitHub Actions workflow for Broken Crystals
+# Bright Agent (STAR) — GitHub Actions (single workflow, all triggers)
 #
-# Agentic DAST: checks out this repo, boots the app via Docker Compose
-# (compose.local.yml), scans the live endpoints, and commits/PRs verified fixes.
+# Adapted from the official template:
+#   https://github.com/NeuraLegion/bright-agent-dist/blob/main/examples/ci/github-actions.yml
 #
-# The agent only runs when you explicitly ask for it:
+# One workflow drives the agent on every entry point:
+#   • pull_request      → PR-scoped scan; commits fixes to the PR head branch.
+#   • issue_comment     → an OWNER/MEMBER/COLLABORATOR comments `/bright-agent <guidance>`
+#                         on a PR to re-run with steering.
+#   • workflow_dispatch → manual full scan (use this to smoke-test the setup).
+#   • schedule          → nightly full scan.
 #
-#   • issue_comment     → a repo OWNER / MEMBER / COLLABORATOR comments
-#                         `/bright-agent <guidance>` (lowercase) on a PR; runs
-#                         that PR with the guidance routed to the right phase
-#                         (commits fixes to its head branch, sticky comment,
-#                         "Bright Agent" status).
-#   • workflow_dispatch → manual scan, launched by hand on a chosen branch.
+# Broken Crystals is a NestJS + React benchmark app. The agent checks out this
+# repo, boots the stack via Docker Compose (compose.local.yml), scans the live
+# endpoints, and commits/PRs verified fixes.
 #
-# Runner prerequisites: Docker, Docker Compose, Git, curl, sha256sum (all on
-# GitHub-hosted `ubuntu-latest`).
-#
-# Required repository secrets:
-#     BRIGHT_TOKEN      Bright API token from https://app.brightsec.com
-#     INFERENCE_TOKEN   API token for your OpenAI-compatible inference endpoint
-#   and one repository variable:
-#     INFERENCE_URL     that endpoint's base URL (OpenAI, GitHub Models, Ollama, …)
-#
+# Required repo secrets: BRIGHT_TOKEN, INFERENCE_TOKEN
+# Required repo variable: INFERENCE_URL (e.g. https://api.anthropic.com)
 # Repo access uses the built-in GITHUB_TOKEN (see `permissions:`).
 #
-# IMPORTANT for steering: GitHub only triggers `issue_comment` workflows from
-# the file on your repo's DEFAULT branch — so this workflow must be merged to
-# the default branch for `/bright-agent` replies to work.
+# ONE-TIME MANUAL STEP: Settings → Actions → General → Workflow permissions →
+# enable "Allow GitHub Actions to create and approve pull requests" (else fix PRs 403).
+#
+# NOTE: for `/bright-agent` steering to work, this file must live on the DEFAULT branch.
 
-name: Bright Agent (DAST)
+name: Bright Agent (STAR)
 
 on:
+  pull_request:
+    types: [opened, synchronize, reopened]
   issue_comment:
     types: [created]
   workflow_dispatch: {}
+  schedule:
+    - cron: "0 3 * * *" # nightly at 03:00 UTC
 
-# contents: write     → commit fixes onto the (PR head or scan) branch
-# pull-requests: write → open/update the PR + summary comment + reactions
-# statuses: write     → set the "Bright Agent" commit status
 permissions:
   contents: write
   pull-requests: write
   statuses: write
 
-# One run per PR (its /bright-agent replies); else per ref (manual dispatch).
 concurrency:
-  group: bright-agent-${{ github.event.issue.number || github.ref }}
+  group: bright-agent-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
   bright-agent:
-    # Trigger gates:
-    #  • issue_comment: a lowercase `/bright-agent` comment from a repo
-    #                   OWNER / MEMBER / COLLABORATOR on a PR.
-    #  • workflow_dispatch: always (manual run on a chosen branch).
     if: >-
+      (github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         contains(github.event.comment.body, '/bright-agent') &&
         contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
     runs-on: ubuntu-latest
     env:
       # Runner platform/arch: linux-x64 | linux-arm64 | darwin-x64 | darwin-arm64
       ASSET: bright-agent-linux-x64
     steps:
-      # For a `/bright-agent` comment: resolve the PR over the API and REFUSE
-      # fork PRs BEFORE any checkout. issue_comment runs in the base-repo context
-      # with secrets in scope, so checking out and running a fork's head would
-      # leak them. Outputs the head/base refs the run binds to.
       - name: Resolve steering PR (refuse forks)
         id: steer
         if: github.event_name == 'issue_comment'
@@ -98,13 +89,11 @@ jobs:
             core.setOutput("head_ref", pr.head.ref);
             core.setOutput("base_ref", pr.base.ref);
 
-      # Check out the tree to scan. /bright-agent comment → the PR head branch
-      # (so fixes commit back to it); manual dispatch → the chosen ref. Download
-      # the binary OUTSIDE this checkout so it's never swept into a fix commit.
       - uses: actions/checkout@v5
         with:
           ref: >-
             ${{ (github.event_name == 'issue_comment' && steps.steer.outputs.head_ref)
+              || (github.event_name == 'pull_request' && github.event.pull_request.head.ref)
               || github.ref }}
           fetch-depth: 0
 
@@ -119,20 +108,18 @@ jobs:
           sha256sum -c "${ASSET}.sha256"
           chmod +x "${ASSET}"
 
-      - name: Show all available env variables
-        run: env | sort
-
       - name: Run Bright Agent
         env:
-          # Run against the checked-out tree. REPOSITORY_URL is derived from the
-          # checkout's `origin` remote (set REPOSITORY_URL to override).
           LOCAL_REPO_PATH: ${{ github.workspace }}
           REPO_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRIGHT_TOKEN: ${{ secrets.BRIGHT_TOKEN }}
+          BRIGHT_HOSTNAME: "https://cloud.brightsec.com"
           INFERENCE_URL: ${{ vars.INFERENCE_URL }}
           INFERENCE_TOKEN: ${{ secrets.INFERENCE_TOKEN }}
-          # Steering inputs — populated only for a `/bright-agent` comment; empty
-          # for every other trigger, so the agent runs a normal scan.
+          # Anthropic Claude — cheapest tier to start; add a comma-separated
+          # chain (e.g. "claude-haiku-4-5-20251001,claude-sonnet-5") to auto-escalate.
+          AI_MODEL: claude-haiku-4-5-20251001
+          # Steering inputs — populated only for a `/bright-agent` comment.
           BRIGHT_STEERING_COMMENT: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
           BRIGHT_STEERING_COMMENT_ID: ${{ github.event_name == 'issue_comment' && github.event.comment.id || '' }}
           BRIGHT_STEERING_AUTHOR: ${{ github.event_name == 'issue_comment' && github.event.comment.user.login || '' }}
@@ -140,22 +127,10 @@ jobs:
           BRIGHT_STEERING_PR_NUMBER: ${{ github.event_name == 'issue_comment' && github.event.issue.number || '' }}
           BRIGHT_STEERING_PR_HEAD: ${{ steps.steer.outputs.head_ref }}
           BRIGHT_STEERING_PR_BASE: ${{ steps.steer.outputs.base_ref }}
-          # Diff-scope the run to the PR's changes. On an `issue_comment`
-          # (`/bright-agent`) trigger GITHUB_BASE_REF is empty, so the agent
-          # cannot auto-derive the PR base — pass it explicitly as the diff base
-          # so the scan is narrowed to the changed endpoints instead of the
-          # whole repo. Empty on workflow_dispatch → normal (full) scan.
-          DIFF_BASE: ${{ steps.steer.outputs.base_ref && format('origin/{0}', steps.steer.outputs.base_ref) || '' }}
-          # --- Detailed stats & diagnostics ---
-          BRIGHT_DEBUG: "1"
-          BRIGHT_DUMP_TURNS: "1"
-          BRIGHT_DUMP_DIR: ${{ runner.temp }}/bright-dumps
           # Optional:
-          # AI_MODEL: gpt-5.4-mini
           # SCAN_SCOPE: full      # force a full-repo scan even on a PR
+          BRIGHT_DEBUG: "1"
         run: "${{ runner.temp }}/${{ env.ASSET }}"
-
-      # --- Artifact uploads (always run, even on failure) ---
 
       - name: Upload Bright Agent logs
         if: always()
@@ -163,17 +138,9 @@ jobs:
         with:
           name: bright-agent-logs
           path: ~/.bright-agent/logs/
-          if-no-files-found: ignore
-
-      - name: Upload LLM turn dumps
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bright-agent-turn-dumps
-          path: ${{ runner.temp }}/bright-dumps/
-          if-no-files-found: ignore
+          retention-days: 7
 
 # NOTE: commits/PRs/comments made with GITHUB_TOKEN do not trigger your other
 # workflows (GitHub's anti-recursion rule). To have fix commits re-run your
-# repo's CI (check.yml / check-client.yml), use a PAT instead:
+# repo's CI (check.yml / check-client.yml), swap REPO_ACCESS_TOKEN to a PAT:
 #     REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}

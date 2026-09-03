@@ -1,0 +1,87 @@
+# Endor Labs SAST → SARIF
+#
+# Runs an Endor Labs SAST scan and writes findings to a SARIF 2.1.0 file,
+# then uploads that file as a workflow artifact. Optionally uploads it to
+# GitHub code scanning when UPLOAD_SARIF_TO_GITHUB is true.
+#
+# Keep ENDOR_WORKFLOW / ENDOR_SARIF_* in sync with bright-agent-sast-validation.yml.
+# That workflow starts after this one succeeds (workflow_run) and downloads
+# the same artifact name / file name.
+#
+# Required repository secrets:
+#     ENDOR_API_CREDENTIALS_KEY
+#     ENDOR_API_CREDENTIALS_SECRET
+# Optional repository variables:
+#     ENDOR_NAMESPACE   Endor tenant (defaults to ram-learn)
+#     ENDOR_API         API host (defaults to https://api.endorlabs.com)
+
+name: Endor Labs SAST
+
+on:
+  pull_request:
+  push:
+    branches: [stable, unstable]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  actions: read
+  security-events: write
+
+concurrency:
+  group: endor-sast-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  ENDOR_NAMESPACE: ${{ vars.ENDOR_NAMESPACE || 'ram-learn' }}
+  ENDOR_API: ${{ vars.ENDOR_API || 'https://api.endorlabs.com' }}
+  ENDOR_LANGUAGES: javascript,typescript
+  ENDOR_WORKFLOW: endor-sast.yml
+  ENDOR_SARIF_ARTIFACT: endor-sast-sarif
+  ENDOR_SARIF_FILE: endor-sast.sarif
+  UPLOAD_SARIF_TO_GITHUB: "true"
+  SCAN_SUMMARY_OUTPUT_TYPE: table
+
+jobs:
+  endor-sast:
+    runs-on: ubuntu-latest
+    env:
+      SARIF_PATH: ${{ runner.temp }}/${{ env.ENDOR_SARIF_FILE }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Endor Labs SAST scan
+        uses: endorlabs/github-action@b8992820cc4d9c9e7ded5022adf6cabe2dc11946 # v1.1.12
+        with:
+          namespace: ${{ env.ENDOR_NAMESPACE }}
+          api: ${{ env.ENDOR_API }}
+          api_key: ${{ secrets.ENDOR_API_CREDENTIALS_KEY }}
+          api_secret: ${{ secrets.ENDOR_API_CREDENTIALS_SECRET }}
+          enable_github_action_token: false
+          scan_sast: true
+          scan_dependencies: false
+          scan_secrets: false
+          pr: ${{ github.event_name == 'pull_request' }}
+          scan_summary_output_type: ${{ env.SCAN_SUMMARY_OUTPUT_TYPE }}
+          sarif_file: ${{ env.SARIF_PATH }}
+          additional_args: --languages ${{ env.ENDOR_LANGUAGES }}
+          export_scan_result_artifact: false
+
+      - name: Upload SARIF artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ENDOR_SARIF_ARTIFACT }}
+          path: ${{ env.SARIF_PATH }}
+          if-no-files-found: warn
+          retention-days: 14
+
+      - name: Upload SARIF to GitHub code scanning
+        if: always() && env.UPLOAD_SARIF_TO_GITHUB == 'true'
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: ${{ env.SARIF_PATH }}
+          category: endor-sast
