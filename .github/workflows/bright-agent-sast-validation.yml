@@ -85,7 +85,6 @@ jobs:
       ENDOR_WORKFLOW: endor-sast.yml
       ENDOR_SARIF_ARTIFACT: endor-sast-sarif
       ENDOR_SARIF_FILE: endor-sast.sarif
-      SARIF_DIR: ${{ runner.temp }}/sarif
       ENDOR_NAMESPACE: ${{ vars.ENDOR_NAMESPACE || 'ram-learn' }}
       ENDOR_API: ${{ vars.ENDOR_API || 'https://api.endorlabs.com' }}
       ENDOR_LANGUAGES: javascript,typescript
@@ -168,7 +167,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: ${{ env.ENDOR_SARIF_ARTIFACT }}
-          path: ${{ env.SARIF_DIR }}
+          path: ${{ runner.temp }}/sarif
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
           run-id: ${{ steps.endor.outputs.run_id }}
@@ -202,7 +201,7 @@ jobs:
           # Validation mode: map Endor SARIF findings → DAST tests, scan, and
           # report which are dynamically confirmed. No fix loop runs.
           RUN_MODE: validation
-          SARIF_PATH: ${{ env.SARIF_DIR }}/${{ env.ENDOR_SARIF_FILE }}
+          SARIF_PATH: ${{ runner.temp }}/sarif/${{ env.ENDOR_SARIF_FILE }}
           # Steering inputs — populated only for a `/bright-validate` comment;
           # empty for a manual dispatch.
           BRIGHT_STEERING_COMMENT: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
@@ -243,7 +242,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: bright-agent-sast-sarif
-          path: ${{ env.SARIF_DIR }}/
+          path: ${{ runner.temp }}/sarif/
           if-no-files-found: ignore
 
 # NOTE: commits/PRs/comments made with GITHUB_TOKEN do not trigger your other

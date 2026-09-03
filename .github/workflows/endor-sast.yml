@@ -45,8 +45,6 @@ env:
 jobs:
   endor-sast:
     runs-on: ubuntu-latest
-    env:
-      SARIF_PATH: ${{ runner.temp }}/${{ env.ENDOR_SARIF_FILE }}
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -66,7 +64,7 @@ jobs:
           scan_secrets: false
           pr: ${{ github.event_name == 'pull_request' }}
           scan_summary_output_type: ${{ env.SCAN_SUMMARY_OUTPUT_TYPE }}
-          sarif_file: ${{ env.SARIF_PATH }}
+          sarif_file: ${{ runner.temp }}/${{ env.ENDOR_SARIF_FILE }}
           additional_args: --languages ${{ env.ENDOR_LANGUAGES }}
           export_scan_result_artifact: false
 
@@ -75,7 +73,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ENDOR_SARIF_ARTIFACT }}
-          path: ${{ env.SARIF_PATH }}
+          path: ${{ runner.temp }}/${{ env.ENDOR_SARIF_FILE }}
           if-no-files-found: warn
           retention-days: 14
 
@@ -83,5 +81,5 @@ jobs:
         if: always() && env.UPLOAD_SARIF_TO_GITHUB == 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: ${{ env.SARIF_PATH }}
+          sarif_file: ${{ runner.temp }}/${{ env.ENDOR_SARIF_FILE }}
           category: endor-sast
