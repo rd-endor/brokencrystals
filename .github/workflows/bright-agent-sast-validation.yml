@@ -198,7 +198,6 @@ jobs:
           BRIGHT_HOSTNAME: ${{ vars.BRIGHT_HOSTNAME || 'https://cloud.brightsec.com' }}
           INFERENCE_URL: ${{ vars.INFERENCE_URL }}
           INFERENCE_TOKEN: ${{ secrets.INFERENCE_TOKEN }}
-          BRIGHT_PROJECT_ID: ${{ vars.BRIGHT_PROJECT_ID }}
           # Validation mode: map Endor SARIF findings → DAST tests, scan, and
           # report which are dynamically confirmed. No fix loop runs.
           RUN_MODE: validation

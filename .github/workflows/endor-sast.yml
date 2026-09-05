@@ -1,8 +1,9 @@
-# Endor Labs SAST → SARIF
+# Endor Labs SAST + AI SAST → SARIF
 #
-# Runs an Endor Labs SAST scan and writes findings to a SARIF 2.1.0 file,
-# then uploads that file as a workflow artifact. Optionally uploads it to
-# GitHub code scanning when UPLOAD_SARIF_TO_GITHUB is true.
+# Runs Endor Labs rule-based SAST and the AI SAST detection agent, writes
+# findings to a SARIF 2.1.0 file, then uploads that file as a workflow
+# artifact. Optionally uploads it to GitHub code scanning when
+# UPLOAD_SARIF_TO_GITHUB is true.
 #
 # Keep ENDOR_WORKFLOW / ENDOR_SARIF_* in sync with bright-agent-sast-validation.yml.
 # That workflow starts after this one succeeds (workflow_run) and downloads
@@ -41,6 +42,8 @@ env:
   ENDOR_SARIF_FILE: endor-sast.sarif
   UPLOAD_SARIF_TO_GITHUB: "true"
   SCAN_SUMMARY_OUTPUT_TYPE: table
+  SCAN_SAST: "true"
+  SCAN_AI_SAST: "true"
 
 jobs:
   endor-sast:
@@ -51,7 +54,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Endor Labs SAST scan
+      - name: Endor Labs SAST + AI SAST scan
         uses: endorlabs/github-action@b8992820cc4d9c9e7ded5022adf6cabe2dc11946 # v1.1.12
         with:
           namespace: ${{ env.ENDOR_NAMESPACE }}
@@ -59,13 +62,14 @@ jobs:
           api_key: ${{ secrets.ENDOR_API_CREDENTIALS_KEY }}
           api_secret: ${{ secrets.ENDOR_API_CREDENTIALS_SECRET }}
           enable_github_action_token: false
-          scan_sast: true
+          scan_sast: ${{ env.SCAN_SAST }}
           scan_dependencies: false
           scan_secrets: false
           pr: ${{ github.event_name == 'pull_request' }}
           scan_summary_output_type: ${{ env.SCAN_SUMMARY_OUTPUT_TYPE }}
           sarif_file: ${{ runner.temp }}/${{ env.ENDOR_SARIF_FILE }}
-          additional_args: --languages ${{ env.ENDOR_LANGUAGES }}
+          # v1.1.12 has no scan_ai_sast input; --ai-sast enables the detection agent.
+          additional_args: --languages ${{ env.ENDOR_LANGUAGES }}${{ env.SCAN_AI_SAST == 'true' && ' --ai-sast' || '' }}
           export_scan_result_artifact: false
 
       - name: Upload SARIF artifact
