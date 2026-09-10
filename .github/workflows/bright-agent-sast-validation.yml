@@ -5,37 +5,27 @@
 # against a live STAR/DAST scan (RUN_MODE=validation). No Endor scan runs
 # here, and no fix loop runs.
 #
-# This complements the STAR workflow (bright-agent.yml): that one scans + fixes,
-# this one proves out Endor static findings dynamically.
-#
 # Sequence (two separate workflows, same SARIF env names):
 #   1. endor-sast.yml runs and uploads ENDOR_SARIF_ARTIFACT (endor-sast-sarif).
-#   2. this workflow starts after that run succeeds (workflow_run), or later
-#      via /bright-validate / workflow_dispatch.
+#   2. this workflow starts after that run succeeds (workflow_run).
 #
 # Keep ENDOR_WORKFLOW / ENDOR_SARIF_* in sync with endor-sast.yml.
 #
-#   • workflow_run      → after a successful Endor Labs SAST run; uses that
-#                         run's SARIF and the same commit.
-#   • issue_comment     → `/bright-validate` on a PR (OWNER/MEMBER/COLLABORATOR);
-#                         downloads the latest successful Endor SARIF for the
-#                         PR head branch.
-#   • workflow_dispatch → manual run on a chosen branch.
+#   • workflow_run → after a successful Endor Labs SAST run; uses that run's
+#                    SARIF and the same commit.
 #
 # Runner prerequisites: Docker, Docker Compose, Git, curl, sha256sum (all on
 # GitHub-hosted `ubuntu-latest`).
 #
 # Required repository secrets:
-#     BRIGHT_TOKEN      Bright API token from https://app.brightsec.com
+#     BRIGHT_TOKEN      Bright API token
 #     INFERENCE_TOKEN   API token for your OpenAI-compatible inference endpoint
 #   and one repository variable:
 #     INFERENCE_URL     that endpoint's base URL (OpenAI, GitHub Models, Ollama, …)
 #
 # Repo access uses the built-in GITHUB_TOKEN (see `permissions:`).
 #
-# IMPORTANT for the comment trigger: GitHub only triggers `issue_comment`
-# workflows from the file on your repo's DEFAULT branch — so this workflow must
-# be merged to the default branch for `/bright-validate` replies to work.
+# workflow_run only fires from the copy of this file on the DEFAULT branch.
 
 name: Bright Agent (SAST Validation)
 
@@ -43,44 +33,29 @@ on:
   workflow_run:
     workflows: ["Endor Labs SAST"]
     types: [completed]
-  issue_comment:
-    types: [created]
-  workflow_dispatch: {}
 
 # contents: write      → push the validation summary branch
 # pull-requests: write → open/update the PR + summary comment + reactions
 # statuses: write      → set the commit status
-# actions: read        → list Endor SAST runs and download its SARIF artifact
+# actions: read        → download the Endor SAST SARIF artifact
 permissions:
   contents: write
   pull-requests: write
   statuses: write
   actions: read
 
-# One run per Endor SAST run, PR comment, or dispatched ref.
 concurrency:
-  group: bright-sast-validation-${{ github.event.workflow_run.id || github.event.issue.number || github.ref }}
+  group: bright-sast-validation-${{ github.event.workflow_run.id }}
   cancel-in-progress: true
 
 jobs:
   sast-validation:
-    # Trigger gates:
-    #  • workflow_run: Endor Labs SAST succeeded on a same-repo ref.
-    #  • issue_comment: `/bright-validate` from OWNER / MEMBER / COLLABORATOR.
-    #  • workflow_dispatch: always (manual run on a chosen branch).
     if: >-
-      (github.event_name == 'workflow_run' &&
-        github.event.workflow_run.conclusion == 'success' &&
-        (github.event.workflow_run.event != 'pull_request' ||
-          github.event.workflow_run.head_repository.full_name == github.repository)) ||
-      (github.event_name == 'issue_comment' &&
-        github.event.issue.pull_request &&
-        contains(github.event.comment.body, '/bright-validate') &&
-        contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)) ||
-      github.event_name == 'workflow_dispatch'
+      github.event.workflow_run.conclusion == 'success' &&
+      (github.event.workflow_run.event != 'pull_request' ||
+        github.event.workflow_run.head_repository.full_name == github.repository)
     runs-on: ubuntu-latest
     env:
-      # Runner platform/arch: linux-x64 | linux-arm64 | darwin-x64 | darwin-arm64
       ASSET: bright-agent-linux-x64
       ENDOR_WORKFLOW: endor-sast.yml
       ENDOR_SARIF_ARTIFACT: endor-sast-sarif
@@ -89,79 +64,10 @@ jobs:
       ENDOR_API: ${{ vars.ENDOR_API || 'https://api.endorlabs.com' }}
       ENDOR_LANGUAGES: javascript,typescript
     steps:
-      # For a `/bright-validate` comment: resolve the PR over the API and REFUSE
-      # fork PRs BEFORE any checkout. issue_comment runs in the base-repo context
-      # with secrets in scope, so checking out and running a fork's head would
-      # leak them. Outputs the head/base refs the run binds to.
-      - name: Resolve steering PR (refuse forks)
-        id: steer
-        if: github.event_name == 'issue_comment'
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const { data: pr } = await github.rest.pulls.get({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              pull_number: context.issue.number,
-            });
-            const sameRepo =
-              pr.head.repo &&
-              pr.head.repo.full_name === `${context.repo.owner}/${context.repo.repo}`;
-            if (!sameRepo) {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: context.issue.number,
-                body:
-                  "🔒 `/bright-validate` is not available on fork PRs for " +
-                  "security reasons (it would run untrusted code with repository " +
-                  "secrets). Push the branch to this repository to use it.",
-              });
-              core.setFailed("SAST validation disabled on fork PRs.");
-              return;
-            }
-            core.setOutput("head_ref", pr.head.ref);
-            core.setOutput("base_ref", pr.base.ref);
-
-      # Same tree the Endor SARIF was produced from when this run was chained;
-      # /bright-validate → PR head; manual dispatch → the chosen ref.
       - uses: actions/checkout@v5
         with:
-          ref: >-
-            ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.head_sha)
-              || (github.event_name == 'issue_comment' && steps.steer.outputs.head_ref)
-              || github.ref }}
+          ref: ${{ github.event.workflow_run.head_sha }}
           fetch-depth: 2
-
-      # 1. Consume the SARIF produced by the separate Endor Labs SAST workflow.
-      #    Written/downloaded outside the checkout ($RUNNER_TEMP) so it is never
-      #    swept into a commit.
-      - name: Resolve Endor SAST run
-        id: endor
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          WORKFLOW_RUN_ID: ${{ github.event.workflow_run.id }}
-          HEAD_REF: ${{ (github.event_name == 'issue_comment' && steps.steer.outputs.head_ref) || github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [ "${GITHUB_EVENT_NAME}" = "workflow_run" ]; then
-            run_id="${WORKFLOW_RUN_ID}"
-          else
-            run_id="$(gh run list \
-              --workflow "${ENDOR_WORKFLOW}" \
-              --branch "${HEAD_REF}" \
-              --status success \
-              --limit 1 \
-              --json databaseId \
-              --jq '.[0].databaseId // empty')"
-          fi
-          if [ -z "${run_id}" ]; then
-            echo "No successful Endor Labs SAST run found for branch ${HEAD_REF}."
-            echo "Run the Endor Labs SAST workflow first, then retry."
-            exit 1
-          fi
-          echo "run_id=${run_id}" >> "${GITHUB_OUTPUT}"
-          echo "Using Endor SAST run ${run_id}"
 
       - name: Download Endor SARIF artifact
         uses: actions/download-artifact@v4
@@ -170,9 +76,8 @@ jobs:
           path: ${{ runner.temp }}/sarif
           github-token: ${{ secrets.GITHUB_TOKEN }}
           repository: ${{ github.repository }}
-          run-id: ${{ steps.endor.outputs.run_id }}
+          run-id: ${{ github.event.workflow_run.id }}
 
-      # 2. Fetch the Bright Agent binary (outside the checkout).
       - name: Download & verify Bright Agent
         working-directory: ${{ runner.temp }}
         run: |
@@ -187,39 +92,20 @@ jobs:
       - name: Show all available env variables
         run: env | sort
 
-      # 3. Validate the Endor (SAST) findings against a live STAR/DAST scan.
       - name: Run Bright Agent (SAST validation)
         env:
-          # Run against the checked-out tree. REPOSITORY_URL is derived from the
-          # checkout's `origin` remote (set REPOSITORY_URL to override).
           LOCAL_REPO_PATH: ${{ github.workspace }}
           REPO_ACCESS_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRIGHT_TOKEN: ${{ secrets.BRIGHT_TOKEN }}
           BRIGHT_HOSTNAME: ${{ vars.BRIGHT_HOSTNAME || 'https://cloud.brightsec.com' }}
           INFERENCE_URL: ${{ vars.INFERENCE_URL }}
           INFERENCE_TOKEN: ${{ secrets.INFERENCE_TOKEN }}
-          # Validation mode: map Endor SARIF findings → DAST tests, scan, and
-          # report which are dynamically confirmed. No fix loop runs.
           RUN_MODE: validation
           SARIF_PATH: ${{ runner.temp }}/sarif/${{ env.ENDOR_SARIF_FILE }}
-          # Steering inputs — populated only for a `/bright-validate` comment;
-          # empty for a manual dispatch.
-          BRIGHT_STEERING_COMMENT: ${{ github.event_name == 'issue_comment' && github.event.comment.body || '' }}
-          BRIGHT_STEERING_COMMENT_ID: ${{ github.event_name == 'issue_comment' && github.event.comment.id || '' }}
-          BRIGHT_STEERING_AUTHOR: ${{ github.event_name == 'issue_comment' && github.event.comment.user.login || '' }}
-          BRIGHT_STEERING_AUTHOR_ASSOCIATION: ${{ github.event_name == 'issue_comment' && github.event.comment.author_association || '' }}
-          BRIGHT_STEERING_PR_NUMBER: ${{ github.event_name == 'issue_comment' && github.event.issue.number || '' }}
-          BRIGHT_STEERING_PR_HEAD: ${{ steps.steer.outputs.head_ref }}
-          BRIGHT_STEERING_PR_BASE: ${{ steps.steer.outputs.base_ref }}
-          # --- Detailed stats & diagnostics ---
           BRIGHT_DEBUG: "1"
           BRIGHT_DUMP_TURNS: "1"
           BRIGHT_DUMP_DIR: ${{ runner.temp }}/bright-dumps
-          # Optional:
-          # AI_MODEL: gpt-5.4-mini
         run: "${{ runner.temp }}/${{ env.ASSET }}"
-
-      # --- Artifact uploads (always run, even on failure) ---
 
       - name: Upload Bright Agent logs
         if: always()
@@ -244,8 +130,3 @@ jobs:
           name: bright-agent-sast-sarif
           path: ${{ runner.temp }}/sarif/
           if-no-files-found: ignore
-
-# NOTE: commits/PRs/comments made with GITHUB_TOKEN do not trigger your other
-# workflows (GitHub's anti-recursion rule). To have the validation summary PR
-# re-run your repo's CI, use a PAT instead:
-#     REPO_ACCESS_TOKEN: ${{ secrets.REPO_ACCESS_TOKEN }}
